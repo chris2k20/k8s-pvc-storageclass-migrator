@@ -4,10 +4,15 @@ set -euo pipefail
 
 # Function to display usage information
 usage() {
-  echo "Usage: $0 [--wait-for-bound] [--dest-sc=<storage-class>] <PVC_NAME> [NAMESPACE]"
+  echo "Usage: $0 [--wait-for-bound] [--dest-sc=<storage-class>] [--ssh-node-selector=<key=value>] [--rsync-node-selector=<key=value>] [--ignore-mounted] [--no-chown] [--strategies=<strategy1,strategy2>] <PVC_NAME> [NAMESPACE]"
   echo "Options:"
   echo "  --wait-for-bound              Wait for PVCs to be bound before proceeding"
   echo "  --dest-sc=<storage-class>     Set the storage class for the new PVCs"
+  echo "  --ssh-node-selector=<k=v>     Set the nodeSelector for the SSH pod (can be used multiple times)"
+  echo "  --rsync-node-selector=<k=v>   Set the nodeSelector for the Rsync pod (can be used multiple times)"
+  echo "  --ignore-mounted              Do not fail if the source or destination PVC is mounted"
+  echo "  --no-chown                    Omit chown on rsync"
+  echo "  --strategies=<s1,s2,...>      Comma-separated list of strategies to use (default: svc,mnt2,lbsvc)"
   echo "If namespace is not provided, the current context's namespace will be used."
   exit 1
 }
@@ -24,6 +29,12 @@ trap 'handle_error $LINENO' ERR
 # Parse command line arguments
 WAIT_FOR_BOUND=false
 DEST_SC=""
+SSH_NODE_SELECTOR=()
+RSYNC_NODE_SELECTOR=()
+IGNORE_MOUNTED=""
+NO_CHOWN=""
+STRATEGIES="svc"
+
 while [[ $# -gt 0 ]]; do
   case $1 in
     --wait-for-bound)
@@ -32,6 +43,26 @@ while [[ $# -gt 0 ]]; do
       ;;
     --dest-sc=*)
       DEST_SC="${1#*=}"
+      shift
+      ;;
+    --ssh-node-selector=*)
+      SSH_NODE_SELECTOR+=("${1#*=}")
+      shift
+      ;;
+    --rsync-node-selector=*)
+      RSYNC_NODE_SELECTOR+=("${1#*=}")
+      shift
+      ;;
+    --ignore-mounted)
+      IGNORE_MOUNTED="--ignore-mounted"
+      shift
+      ;;
+    --no-chown)
+      NO_CHOWN="--no-chown"
+      shift
+      ;;
+    --strategies=*)
+      STRATEGIES="${1#*=}"
       shift
       ;;
     *)
@@ -103,9 +134,18 @@ if $WAIT_FOR_BOUND; then
   wait_for_pvc_bound "$NEW_PVC_NAME" "$NAMESPACE"
 fi
 
+# Prepare Helm values for nodeSelector
+HELM_VALUES=()
+for selector in "${SSH_NODE_SELECTOR[@]}"; do
+  HELM_VALUES+=("--helm-set-string" "sshd.nodeSelector.${selector}")
+done
+for selector in "${RSYNC_NODE_SELECTOR[@]}"; do
+  HELM_VALUES+=("--helm-set-string" "rsync.nodeSelector.${selector}")
+done
+
 # Migrate data
 echo "Migrating data from $PVC_NAME to $NEW_PVC_NAME..."
-kubectl pv-migrate migrate "$PVC_NAME" "$NEW_PVC_NAME" -n "$NAMESPACE" -s svc
+kubectl pv-migrate migrate "$PVC_NAME" "$NEW_PVC_NAME" -n "$NAMESPACE" -s "$STRATEGIES" "${HELM_VALUES[@]}" $IGNORE_MOUNTED $NO_CHOWN
 
 echo "Waiting for the original PVC $PVC_NAME to be unbound..."
 while check_pvc_bound "$PVC_NAME" "$NAMESPACE"; do
@@ -136,7 +176,7 @@ fi
 
 # Final data migration
 echo "Performing final data migration from $NEW_PVC_NAME to $PVC_NAME..."
-kubectl pv-migrate migrate "$NEW_PVC_NAME" "$PVC_NAME" -n "$NAMESPACE" -s svc
+kubectl pv-migrate migrate "$NEW_PVC_NAME" "$PVC_NAME" -n "$NAMESPACE" -s "$STRATEGIES" "${HELM_VALUES[@]}" $IGNORE_MOUNTED $NO_CHOWN
 
 # Cleanup
 echo "Cleaning up: Deleting temporary PVC $NEW_PVC_NAME"
