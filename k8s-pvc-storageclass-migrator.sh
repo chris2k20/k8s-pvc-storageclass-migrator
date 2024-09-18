@@ -113,6 +113,12 @@ wait_for_pvc_bound() {
 # Check if the PVC exists
 kubectl get pvc "$PVC_NAME" -n "$NAMESPACE" &> /dev/null || { echo "PVC $PVC_NAME does not exist in namespace $NAMESPACE."; exit 1; }
 
+# Check if the volume is bounded before starting
+if check_pvc_bound "$PVC_NAME" "$NAMESPACE"; then
+  echo "Error: The PVC $PVC_NAME is currently bounded. Cannot proceed with migration."
+  exit 1
+fi
+
 # Create new PVC
 echo "Creating new temporary PVC: $NEW_PVC_NAME"
 NEW_PVC_YAML=$(kubectl get pvc "$PVC_NAME" -n "$NAMESPACE" -o yaml | \
